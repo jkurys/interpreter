@@ -1,0 +1,9 @@
+int increment(int &x) {
+    x++;
+}
+
+int main() {
+    int y = 1;
+    increment(y);
+    print(y);   // should be 2
+}

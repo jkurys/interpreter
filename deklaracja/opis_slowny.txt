@@ -1,0 +1,13 @@
+Język jest oparty na Latte z kilkoma modyfikacjami.
+Po pierwsze, jest dodane kilka złożonych typów: tablica, krotka i funkcja.
+Krotka jest zapisywana jako "|x, y, z|", gdzie dokładniejszy sposób jej używania jest zademonstrowany w pliku tuples.txt.
+Typ funkcyjny (np. jako argument funckji) jest zapisywany jako (*typy argumentów*) -> *typ zwracanej wartości*.
+Tablica jest zapisywana tak, jak np. w C.
+Ponadto krotki mogą być pattern-matchowane z lewej strony przypisania z dowolnym poziomem zagłębienia (mogą być krotki w krotkach).
+Funkcje anonimowe są zapisywane tak jak w JS, jednak bez opcji zapisania ich bez nawiasów klamrowych.
+Ponadto w if i while nie trzeba używać nawiasów, tak jak w języku Rust, tj. legalnym jest:
+if x == 0 {
+    return 0;
+}
+Poza tym dodane są instrukcje break i continue ze standardową składnią i działaniem.
+Jest też dodana funkcja print, która wypisuje wartość typu string, bool lub int.

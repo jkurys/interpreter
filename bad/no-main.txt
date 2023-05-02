@@ -1,0 +1,3 @@
+int not_main() {
+    print("HAPPY BAD CODE");
+}

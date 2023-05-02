@@ -1,0 +1,8 @@
+bool modify(int &x) {
+    x++;
+}
+
+int main() {
+    int y = 1;
+    modify(y * 3);
+}

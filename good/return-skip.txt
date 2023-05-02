@@ -1,0 +1,8 @@
+void skip() {
+    return;
+    print("I should not print that.");
+}
+
+int main() {
+    skip();
+}

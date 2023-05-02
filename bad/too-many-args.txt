@@ -1,0 +1,7 @@
+int sum(int i1, int i2) {
+    return i1 + i2;
+}
+
+int main () {
+    print(sum(1, 2, 3));
+}
