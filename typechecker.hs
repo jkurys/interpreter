@@ -121,7 +121,6 @@ eqType (Bool _) (Bool _) = True
 eqType (Str _) (Str _) = True
 eqType (Void _) (Void _) = True
 eqType (Arr _ t1) (Arr _ t2) = t1 `eqType` t2
--- eqType (Tup _ ) (Tup _ )
 eqType (Fun _ args1 return1) (Fun _ args2 return2) = go args1 args2 && return1 `eqType` return2 where
     go (arg1:args1) (arg2:args2) = arg1 `eqType` arg2 && go args1 args2
     go [] [] = True
@@ -347,7 +346,6 @@ checkBlock (Block p stmts) = do
 checkDef :: TopDef -> CheckerMonad ()
 checkDef (FnDef _ returnType fnName args fnBody) = do
     oldRet <- getReturnType
-    -- let env = emptyEnv
     env <- askChecker
     nextEnv <- declareArgs args env
     putReturnType returnType
@@ -375,5 +373,8 @@ checkDefs (Program _ []) = return ()
 
 typeCheck :: Program -> CheckerMonad ()
 typeCheck p = do
-    env <- declGlobals p Env { fnEnv = Map.empty, varEnv = Map.empty }
+    env <- declGlobals p emptyEnv
+    let Env { fnEnv = f } = env
+    let maybeMain = Map.lookup (Ident "main") f
+    CM.when (isNothing maybeMain) (addError BNFC'NoPosition "No function named \"main\" in the program")
     localEnv (const env) (checkDefs p)

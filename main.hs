@@ -11,6 +11,8 @@ import Control.Monad.Trans.Except
 import TypeChecker (runCheckerMonad)
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Class
+import Control.Monad.IO.Class
+import System.IO(hPutStr, stderr)
 
 data FnArg = NoRef Ident | Ref Ident deriving Show
 
@@ -42,16 +44,10 @@ emptyEnv :: Env
 emptyEnv = Env { varEnv = Map.empty, fnEnv = Map.empty }
 
 data IntState = IntState {
-    -- fnEnv :: FunctionEnv,
     varState :: VarState,
-    -- varEnv :: VarEnv,
-    printState :: String,
     returnState :: Maybe VarValue,
     nextLoc :: Location
 }
-
-instance Show IntState where
-    show IntState {printState = p} = p
 
 type Error = String
 
@@ -60,10 +56,13 @@ type InterpreterMonadT s e r m a = StateT s (ExceptT e (ReaderT r m)) a
 runInterpreterMonadT :: (Monad m) => InterpreterMonadT s e r m a -> s -> r -> m (Either e a)
 runInterpreterMonadT m = runReaderT . runExceptT . evalStateT m
 
-type InterpreterMonad a = InterpreterMonadT IntState Error Env Identity a
+type InterpreterMonad a = InterpreterMonadT IntState Error Env IO a
 
-runInterpreterMonad :: InterpreterMonad a -> IntState -> Env -> Either Error a
-runInterpreterMonad env m = runIdentity . runInterpreterMonadT env m
+runInterpreterMonad :: InterpreterMonad a -> IntState -> Env -> IO (Either Error a)
+runInterpreterMonad = runInterpreterMonadT
+
+throwRuntimeError :: Error -> InterpreterMonad ()
+throwRuntimeError err = lift $ throwE $ err ++ ".\n"
 
 askInt :: InterpreterMonad Env
 askInt = lift $ lift ask
@@ -77,7 +76,7 @@ simplifyArg (ArgRef _ _ name) = Ref name
 
 getVariable :: Ident -> InterpreterMonad VarValue
 getVariable name = do
-    IntState { varState = s, printState = p } <- get
+    IntState { varState = s } <- get
     Env { varEnv = v, fnEnv = f } <- askInt
     let loc = Map.lookup name v
 
@@ -98,11 +97,11 @@ getFunction name env = do
 
 declareVariable :: Ident -> VarValue -> Env -> InterpreterMonad Env
 declareVariable name val Env { varEnv = v, fnEnv = f } = do
-    IntState { varState = s, printState = p, returnState = r, nextLoc = n } <- get
+    IntState { varState = s, returnState = r, nextLoc = n } <- get
     let newV = Map.insert name n v
     let newS = Map.insert n val s
     let newEnv = Env { varEnv = newV, fnEnv = f }
-    put IntState { varState = newS, printState = p, returnState = r, nextLoc = n + 1 }
+    put IntState { varState = newS, returnState = r, nextLoc = n + 1 }
     return newEnv
 
 declareReference :: Ident -> Ident -> Env -> InterpreterMonad Env
@@ -115,11 +114,11 @@ declareReference oldName newName Env { varEnv = v, fnEnv = f } = do
 
 modifyVariable :: Ident -> VarValue -> InterpreterMonad ()
 modifyVariable name val = do
-    IntState { varState = s, printState = p, returnState = r, nextLoc = n } <- get
+    IntState { varState = s, returnState = r, nextLoc = n } <- get
     Env { varEnv = v, fnEnv = f } <- askInt
     let Just loc = Map.lookup name v
     let newS = Map.insert loc val s
-    put IntState { varState = newS, printState = p, returnState = r, nextLoc = n }
+    put IntState { varState = newS, returnState = r, nextLoc = n }
 
 getLValue :: Expr -> Ident
 getLValue (EVar _ s) = s
@@ -137,10 +136,7 @@ declareArguments ((NoRef name):args) (e:es) env = do
 declareArguments [] [] env = return env
 
 addPrint :: String -> InterpreterMonad ()
-addPrint printStr = do
-    IntState { varState = v, printState = p, returnState = r, nextLoc = n } <- get
-    let newP = p ++ printStr
-    put IntState { varState = v, printState = newP, returnState = r, nextLoc = n }
+addPrint printStr = lift $ lift $ lift $ putStr printStr
 
 getReturnState :: InterpreterMonad (Maybe VarValue)
 getReturnState = do
@@ -149,8 +145,8 @@ getReturnState = do
 
 putReturnState :: VarValue -> InterpreterMonad ()
 putReturnState newR = do
-    IntState { varState = v, printState = p, returnState = r, nextLoc = n } <- get
-    put IntState { varState = v, printState = p, returnState = Just newR, nextLoc = n }
+    IntState { varState = v, returnState = r, nextLoc = n } <- get
+    put IntState { varState = v, returnState = Just newR, nextLoc = n }
 
 evalExp :: Expr -> InterpreterMonad VarValue
 evalExp (EVar _ varName) = getVariable varName
@@ -224,18 +220,9 @@ evalExp (EApp _ fnName es) = do
     putReturnState oldRet
     return ret
 
--- evalExp _ = return VoidVal
-
 execStmt :: Stmt -> InterpreterMonad ()
 execStmt (Empty _) = return ()
 execStmt (BStmt _ block) = execBlock block
--- execStmt (Decl _ t (item:items)) = do
---     state <- get
---     let (varName, newVarVal) = case item of {
---         (NoInit _ name) -> (name, VoidVal);
---         (Init _ name e) -> (name, evalState (evalExp e) state)
---     }
---     declareVariable varName newVarVal
 execStmt (Ass _ (LVar _ varName) e) = do
     newVarVal <- evalExp e
     modifyVariable varName newVarVal
@@ -255,13 +242,13 @@ execStmt (While p e s) = evalExp e >>= (\(BoolVal b) -> CM.when b $ execStmt s >
 execStmt (SExp _ e) = CM.void $ evalExp e
 execStmt (Print _ e) = do
     e' <- evalExp e
+    CM.when (e' == VoidVal) (throwRuntimeError "Use of uninitialized variable")
     addPrint $ show e'
 execStmt (Ret _ e) = do
     e' <- evalExp e
     putReturnState e'
 execStmt (VRet _) = do
     putReturnState VoidVal
--- execStmt _ = return ()
 
 execFn :: Block -> InterpreterMonad VarValue
 execFn (Block p stmts) = do
@@ -284,7 +271,6 @@ execDecl ((Init _ name e):defs) env = do
     declareVariable name val env >>= execDecl defs
 execDecl [] env = return env
 
--- tutaj trzeba robić ten check czy to decl i jak tak to następne ze zmienionym envem
 execBlock :: Block -> InterpreterMonad ()
 execBlock (Block p stmts) = do
     env <- askInt
@@ -296,8 +282,6 @@ execBlock (Block p stmts) = do
                 Decl _ _ items -> execDecl items env >>= (\env' -> localEnv (const env') (go stmts env'));
                 _ -> execStmt stmt >> go stmts env
             }
-            -- execStmt stmt
-            -- go stmts
         go [] env = return env
 
 declGlobal :: TopDef -> Env -> InterpreterMonad Env
@@ -315,25 +299,12 @@ declGlobals :: [TopDef] -> Env -> InterpreterMonad Env
 declGlobals (def:defs) env = declGlobal def env >>= declGlobals defs
 declGlobals [] env = return env
 
--- topDef :: TopDef -> InterpreterMonad ()
--- topDef (VarDef _ _ varName e) = do
---     newVarValue <- evalExp e
---     declareVariable varName newVarValue
--- topDef (FnDef _ _ fnName args fnBody) = do
---     let args' = map simplifyArg args
---     declareFunction fnName (Func args' fnBody)
-
 runProgram :: Program -> InterpreterMonad ()
 runProgram (Program _ defs) = do
     env <- declGlobals defs emptyEnv
     maybeFun <- getFunction (Ident "main") env
     let Just (Func _ block) = maybeFun
     localEnv (const env) (execBlock block)
-
--- runProgram (Program p (def: defs)) = do
---     -- topDef def
---     declGlobals
---     runProgram (Program p defs)
 
 main = do
     args <- getArgs
@@ -344,11 +315,15 @@ main = do
             case pProgram lex of
                 Left err -> error err
                 Right program -> do
-                    -- let errors = show $ runIdentity $ execState (TC.typeCheck program) $ Identity TC.CheckerState { TC.varState = Map.empty, TC.varEnv = Map.empty, TC.fnEnv = Map.empty, TC.errorState = "", TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition }
                     let result = runCheckerMonad (TC.typeCheck program) TC.CheckerState { TC.varState = Map.empty, TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition } TC.emptyEnv
                     case result of {
-                        Left err -> putStr err;
-                        Right _ -> print $ runInterpreterMonad (runProgram program) IntState { varState = Map.empty, printState = "", returnState = Nothing, nextLoc = 0 } emptyEnv
+                        Left err -> hPutStr stderr err;
+                        Right _ -> do
+                            result <- runInterpreterMonad (runProgram program) IntState { varState = Map.empty, returnState = Nothing, nextLoc = 0 } emptyEnv
+                            case result of {
+                                Left err -> hPutStr stderr err;
+                                Right _ -> return ()
+                            }
                     }
         _ -> error "no file provided"
 
