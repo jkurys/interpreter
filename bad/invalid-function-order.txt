@@ -1,0 +1,7 @@
+int main() {
+    undeclared_in_main();
+}
+
+int undeclared_in_main() {
+    print("I am undeclared");
+}

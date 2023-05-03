@@ -1,0 +1,13 @@
+int decoy_x() {
+    int x = 2;
+}
+
+int illegal_print() {
+    print(x);
+}
+
+int main() {
+    int x = 3;
+    print(x);
+    illegal_print();
+}

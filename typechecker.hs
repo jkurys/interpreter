@@ -14,9 +14,9 @@ type ErrorState = String
 
 type Location = Int
 
-data Function = Func [FnArg] Type
+data Function = Func [FnArg] Type deriving Show
 
-data FnArg = Ref Type | NoRef Type
+data FnArg = Ref Type | NoRef Type deriving Show
 
 type FnEnv = Map.Map Ident Function
 
@@ -27,23 +27,13 @@ type VarState = Map.Map Location Type
 data Env = Env {
     varEnv :: VarEnv,
     fnEnv :: FnEnv
-}
+} deriving Show
 
 data CheckerState = CheckerState {
     varState :: VarState,
-    -- varEnv :: VarEnv,
-    -- fnEnv :: FnEnv,
-    errorState :: ErrorState,
     nextLoc :: Int,
     returnType :: Type
 }
-
-instance Show CheckerState where
-    show :: CheckerState -> String
-    show CheckerState { varState = s, errorState = e, nextLoc = n } = e
-    -- show CheckerState { varState = s, varEnv = en, errorState = e, nextLoc = n } = show en
-
--- type CheckerMonad a = State CheckerState a
 
 type CheckerMonadT s e r m a = StateT s (ExceptT e (ReaderT r m)) a
 
@@ -74,10 +64,8 @@ getVariable p name = do
 askChecker :: CheckerMonad Env
 askChecker = lift $ lift ask
 
-getEnv :: CheckerMonad VarEnv
-getEnv = do
-    Env { varEnv = env } <- askChecker
-    return env
+emptyEnv :: Env
+emptyEnv = Env { varEnv = Map.empty, fnEnv = Map.empty }
 
 localEnv :: (Env -> Env) -> CheckerMonad a -> CheckerMonad a
 localEnv = mapStateT . mapExceptT . local
@@ -89,23 +77,17 @@ getReturnType = do
 
 putReturnType :: Type -> CheckerMonad ()
 putReturnType newRet = do
-    CheckerState { varState = s, errorState = e, nextLoc = n, returnType = r } <- get
-    put CheckerState { varState = s, errorState = e, nextLoc = n, returnType = newRet }
+    CheckerState { varState = s, nextLoc = n, returnType = r } <- get
+    put CheckerState { varState = s, nextLoc = n, returnType = newRet }
 
 declareVariable :: Ident -> Type -> Env -> CheckerMonad Env
 declareVariable name val env = do
-    CheckerState { varState = s, errorState = e, nextLoc = n, returnType = r } <- get
+    CheckerState { varState = s, nextLoc = n, returnType = r } <- get
     let Env { varEnv = v, fnEnv = f } = env
     let newV = Map.insert name n v
     let newS = Map.insert n val s
-    put CheckerState { varState = newS, errorState = e, nextLoc = n + 1, returnType = r }
+    put CheckerState { varState = newS, nextLoc = n + 1, returnType = r }
     return Env { varEnv = newV, fnEnv = f }
-
-getNextLoc :: CheckerMonad Location
-getNextLoc = do
-    CheckerState { varState = s, errorState = e, nextLoc = n, returnType = r } <- get
-    put CheckerState { varState = s, errorState = e, nextLoc = n + 1, returnType = r }
-    return n
 
 getFunction :: Ident -> CheckerMonad (Maybe Function)
 getFunction name = do
@@ -123,10 +105,6 @@ declareArgs (arg:args) env = do
 declareArgs [] env = return env
 
 addError :: BNFC'Position -> ErrorState -> CheckerMonad ()
--- addError p err = do
---     CheckerState { varState = s, errorState = e, nextLoc = n, returnType = r } <- get
---     let newE = e ++ showPosition p ++ " " ++ err ++ ".\n"
---     put CheckerState { varState = s, errorState = newE, nextLoc = n, returnType = r }
 addError p err = lift $ throwE $ showPosition p ++ " " ++ err ++ ".\n"
 
 isInt :: Type -> Bool
@@ -333,14 +311,6 @@ checkStmt (Incr p name) = do
         _ -> addError p $ "Tried to increment non-integer variable " ++ show name
     }
     return ()
--- checkStmt (Decl p t ((NoInit _ name):defs)) = do
---     declareVariable name t
---     return ()
--- checkStmt (Decl p t ((Init _ name e):defs)) = do
---     e' <- evalExprType e
---     CM.unless (t `eqType` e') (addError p $ "Result of the expression doesn't match the declared type.\n Declared type: " ++ showType t ++ ". Instead got: " ++ showType e')
---     declareVariable name t
---     return ()
 checkStmt (BStmt p block) = checkBlock block
 checkStmt (Ret p e) = do
     e' <- evalExprType e
@@ -352,8 +322,8 @@ checkStmt (VRet p) = do
 checkStmt (SExp _ e) = CM.void $ evalExprType e
 
 declareVariables :: BNFC'Position -> Type -> [Item] -> Env -> CheckerMonad Env
-declareVariables p t (NoInit _ name:defs) env = declareVariable name t env >>= declareVariables p t defs
-declareVariables p t (Init _ name e:defs) env = do
+declareVariables p t ((NoInit _ name):defs) env = declareVariable name t env >>= declareVariables p t defs
+declareVariables p t ((Init _ name e):defs) env = do
     t' <- evalExprType e
     CM.unless (t' `eqType` t) (addError p $ "Result of the expression doesn't match the declared type.\n Declared type: " ++ showType t ++ ". Instead got: " ++ showType t')
     nextEnv <- declareVariable name t env
@@ -377,6 +347,7 @@ checkBlock (Block p stmts) = do
 checkDef :: TopDef -> CheckerMonad ()
 checkDef (FnDef _ returnType fnName args fnBody) = do
     oldRet <- getReturnType
+    -- let env = emptyEnv
     env <- askChecker
     nextEnv <- declareArgs args env
     putReturnType returnType

@@ -7,8 +7,10 @@ import qualified Control.Monad as CM
 import qualified TypeChecker as TC
 import Data.Functor.Identity
 import Data.Maybe (isNothing)
-import Control.Monad.Trans.Except (runExceptT)
+import Control.Monad.Trans.Except
 import TypeChecker (runCheckerMonad)
+import Control.Monad.Trans.Reader
+import Control.Monad.Trans.Class
 
 data FnArg = NoRef Ident | Ref Ident deriving Show
 
@@ -31,12 +33,21 @@ type Location = Int
 
 type VarEnv = Map.Map Ident Location
 
-data IntState = IntState {
+data Env = Env {
     fnEnv :: FunctionEnv,
+    varEnv :: VarEnv
+}
+
+emptyEnv :: Env
+emptyEnv = Env { varEnv = Map.empty, fnEnv = Map.empty }
+
+data IntState = IntState {
+    -- fnEnv :: FunctionEnv,
     varState :: VarState,
-    varEnv :: VarEnv,
+    -- varEnv :: VarEnv,
     printState :: String,
-    returnState :: Maybe VarValue
+    returnState :: Maybe VarValue,
+    nextLoc :: Location
 }
 
 instance Show IntState where
@@ -44,7 +55,21 @@ instance Show IntState where
 
 type Error = String
 
-type InterpreterMonad = State IntState
+type InterpreterMonadT s e r m a = StateT s (ExceptT e (ReaderT r m)) a
+
+runInterpreterMonadT :: (Monad m) => InterpreterMonadT s e r m a -> s -> r -> m (Either e a)
+runInterpreterMonadT m = runReaderT . runExceptT . evalStateT m
+
+type InterpreterMonad a = InterpreterMonadT IntState Error Env Identity a
+
+runInterpreterMonad :: InterpreterMonad a -> IntState -> Env -> Either Error a
+runInterpreterMonad env m = runIdentity . runInterpreterMonadT env m
+
+askInt :: InterpreterMonad Env
+askInt = lift $ lift ask
+
+localEnv :: (Env -> Env) -> InterpreterMonad a -> InterpreterMonad a
+localEnv = mapStateT . mapExceptT . local
 
 simplifyArg :: Arg -> FnArg
 simplifyArg (ArgVal _ (Value _ _ name)) = NoRef name
@@ -52,8 +77,9 @@ simplifyArg (ArgRef _ _ name) = Ref name
 
 getVariable :: Ident -> InterpreterMonad VarValue
 getVariable name = do
-    IntState { varState = s, varEnv = env, printState = p, fnEnv = f } <- get
-    let loc = Map.lookup name env
+    IntState { varState = s, printState = p } <- get
+    Env { varEnv = v, fnEnv = f } <- askInt
+    let loc = Map.lookup name v
 
     case loc of {
         Nothing -> addPrint ("Variable " ++ show name ++ " was not initialized.\n") >> return VoidVal;
@@ -65,68 +91,56 @@ getVariable name = do
             }
     }
 
-getEnv :: InterpreterMonad VarEnv
-getEnv = do
-    IntState { varState = s, varEnv = env, printState = p, fnEnv = f } <- get
-    return env
+getFunction :: Ident -> Env -> InterpreterMonad (Maybe Function)
+getFunction name env = do
+    let Env { varEnv = v, fnEnv = f } = env
+    return $ Map.lookup name f
 
-putEnv :: VarEnv -> InterpreterMonad ()
-putEnv newEnv = do
-    IntState { varState = s, varEnv = env, printState = p, fnEnv = f, returnState = r } <- get
-    put IntState { varState = s, varEnv = newEnv, printState = p, fnEnv = f, returnState = r }
+declareVariable :: Ident -> VarValue -> Env -> InterpreterMonad Env
+declareVariable name val Env { varEnv = v, fnEnv = f } = do
+    IntState { varState = s, printState = p, returnState = r, nextLoc = n } <- get
+    let newV = Map.insert name n v
+    let newS = Map.insert n val s
+    let newEnv = Env { varEnv = newV, fnEnv = f }
+    put IntState { varState = newS, printState = p, returnState = r, nextLoc = n + 1 }
+    return newEnv
 
-getFunction :: Ident -> InterpreterMonad Function
-getFunction fnName = do
-    IntState { fnEnv = f } <- get
-    let Just fn = Map.lookup fnName f
-    return fn
+declareReference :: Ident -> Ident -> Env -> InterpreterMonad Env
+declareReference oldName newName Env { varEnv = v, fnEnv = f } = do
+    let Just loc = Map.lookup oldName v
+    let newV = Map.insert newName loc v
+    let newEnv = Env { varEnv = newV, fnEnv = f }
+    return newEnv
 
-declareFunction :: Ident -> Function -> InterpreterMonad ()
-declareFunction name fn = do
-    IntState { varState = s, varEnv = env, printState = p, fnEnv = f, returnState = r } <- get
-    let newF = Map.insert name fn f
-    put IntState { varState = s, varEnv = env, printState = p, fnEnv = newF, returnState = r }
-
-declareVariable :: Ident -> VarValue -> InterpreterMonad ()
-declareVariable name val = do
-    IntState { varState = s, varEnv = env, printState = p, fnEnv = f, returnState = r } <- get
-    let newLoc = Map.size env
-    let newEnv = Map.insert name newLoc env
-    let newS = Map.insert newLoc val s
-    put IntState { varState = newS, varEnv = newEnv, printState = p, fnEnv = f, returnState = r }
-
-declareReference :: Ident -> Ident -> InterpreterMonad ()
-declareReference oldName newName = do
-    IntState { varState = s, varEnv = env, printState = p, fnEnv = f, returnState = r } <- get
-    let Just loc = Map.lookup oldName env
-    let newEnv = Map.insert newName loc env
-    put IntState { varState = s, varEnv = newEnv, printState = p, fnEnv = f, returnState = r }
 
 modifyVariable :: Ident -> VarValue -> InterpreterMonad ()
 modifyVariable name val = do
-    IntState { varState = s, varEnv = env, printState = p, fnEnv = f, returnState = r } <- get
-    let Just loc = Map.lookup name env
+    IntState { varState = s, printState = p, returnState = r, nextLoc = n } <- get
+    Env { varEnv = v, fnEnv = f } <- askInt
+    let Just loc = Map.lookup name v
     let newS = Map.insert loc val s
-    put IntState { varState = newS, varEnv = env, printState = p, fnEnv = f, returnState = r }
+    put IntState { varState = newS, printState = p, returnState = r, nextLoc = n }
 
 getLValue :: Expr -> Ident
 getLValue (EVar _ s) = s
 
-declareArguments :: [FnArg] -> [Expr] -> InterpreterMonad ()
-declareArguments (arg:args) (e:es) = do
+declareArguments :: [FnArg] -> [Expr] -> Env -> InterpreterMonad Env
+declareArguments ((Ref name):args) (e:es) env = do
     val <- evalExp e
-    case arg of {
-        Ref name -> declareReference (getLValue e) name;
-        NoRef name -> declareVariable name val
-    }
-    declareArguments args es
-declareArguments [] [] = return ()
+    env' <- declareReference (getLValue e) name env
+    declareArguments args es env'
+declareArguments ((NoRef name):args) (e:es) env = do
+    val <- evalExp e
+    env' <- declareVariable name val env
+    declareArguments args es env'
+
+declareArguments [] [] env = return env
 
 addPrint :: String -> InterpreterMonad ()
 addPrint printStr = do
-    IntState { varState = v, varEnv = env, fnEnv = f, printState = p, returnState = r } <- get
+    IntState { varState = v, printState = p, returnState = r, nextLoc = n } <- get
     let newP = p ++ printStr
-    put IntState { varState = v, varEnv = env, fnEnv = f, printState = newP, returnState = r }
+    put IntState { varState = v, printState = newP, returnState = r, nextLoc = n }
 
 getReturnState :: InterpreterMonad (Maybe VarValue)
 getReturnState = do
@@ -135,8 +149,8 @@ getReturnState = do
 
 putReturnState :: VarValue -> InterpreterMonad ()
 putReturnState newR = do
-    IntState { varState = v, varEnv = env, fnEnv = f, printState = p, returnState = r } <- get
-    put IntState { varState = v, varEnv = env, fnEnv = f, printState = p, returnState = Just newR }
+    IntState { varState = v, printState = p, returnState = r, nextLoc = n } <- get
+    put IntState { varState = v, printState = p, returnState = Just newR, nextLoc = n }
 
 evalExp :: Expr -> InterpreterMonad VarValue
 evalExp (EVar _ varName) = getVariable varName
@@ -200,12 +214,14 @@ evalExp (ERel _ e1 op e2) = do
 evalExp (EAnd _ e1 e2) = evalExp e1 >>= (\(BoolVal b1) -> evalExp e2 >>= (\(BoolVal b2) -> return $ BoolVal $ b1 && b2))
 evalExp (EOr _ e1 e2) = evalExp e1 >>= (\(BoolVal b1) -> evalExp e2 >>= (\(BoolVal b2) -> return $ BoolVal $ b1 || b2))
 evalExp (EApp _ fnName es) = do
-    Func argNames block <- getFunction fnName
-    oldEnv <- getEnv
-    declareArguments argNames es
-    ret <- execFn block
-    putEnv oldEnv
-    putReturnState VoidVal
+    env <- askInt
+    maybeRet <- getReturnState
+    let Just oldRet = maybeRet
+    fun <- getFunction fnName env
+    let Just (Func argNames block) = fun
+    nextEnv <- declareArguments argNames es env
+    ret <- localEnv (const nextEnv) (execFn block)
+    putReturnState oldRet
     return ret
 
 -- evalExp _ = return VoidVal
@@ -213,13 +229,13 @@ evalExp (EApp _ fnName es) = do
 execStmt :: Stmt -> InterpreterMonad ()
 execStmt (Empty _) = return ()
 execStmt (BStmt _ block) = execBlock block
-execStmt (Decl _ t (item:items)) = do
-    state <- get
-    let (varName, newVarVal) = case item of {
-        (NoInit _ name) -> (name, VoidVal);
-        (Init _ name e) -> (name, evalState (evalExp e) state)
-    }
-    declareVariable varName newVarVal
+-- execStmt (Decl _ t (item:items)) = do
+--     state <- get
+--     let (varName, newVarVal) = case item of {
+--         (NoInit _ name) -> (name, VoidVal);
+--         (Init _ name e) -> (name, evalState (evalExp e) state)
+--     }
+--     declareVariable varName newVarVal
 execStmt (Ass _ (LVar _ varName) e) = do
     newVarVal <- evalExp e
     modifyVariable varName newVarVal
@@ -249,9 +265,7 @@ execStmt (VRet _) = do
 
 execFn :: Block -> InterpreterMonad VarValue
 execFn (Block p stmts) = do
-    oldEnv <- getEnv
     go stmts
-    putEnv oldEnv
     maybeRet <- getReturnState
     let Just ret = maybeRet
     return ret
@@ -263,34 +277,63 @@ execFn (Block p stmts) = do
             CM.when (isNothing maybeRet) (go stmts)
         go [] = return ()
 
+execDecl :: [Item] -> Env -> InterpreterMonad Env
+execDecl ((NoInit _ name):defs) env = declareVariable name VoidVal env >>= execDecl defs
+execDecl ((Init _ name e):defs) env = do
+    val <- evalExp e
+    declareVariable name val env >>= execDecl defs
+execDecl [] env = return env
+
+-- tutaj trzeba robić ten check czy to decl i jak tak to następne ze zmienionym envem
 execBlock :: Block -> InterpreterMonad ()
 execBlock (Block p stmts) = do
-    oldEnv <- getEnv
-    go stmts
-    putEnv oldEnv
+    env <- askInt
+    CM.void $ go stmts env
         where
-        go :: [Stmt] -> InterpreterMonad ()
-        go (stmt:stmts) = do
-            execStmt stmt
-            go stmts
-        go [] = return ()
+        go :: [Stmt] -> Env -> InterpreterMonad Env
+        go (stmt:stmts) env = do
+            case stmt of {
+                Decl _ _ items -> execDecl items env >>= (\env' -> localEnv (const env') (go stmts env'));
+                _ -> execStmt stmt >> go stmts env
+            }
+            -- execStmt stmt
+            -- go stmts
+        go [] env = return env
 
-topDef :: TopDef -> InterpreterMonad ()
-topDef (VarDef _ _ varName e) = do
+declGlobal :: TopDef -> Env -> InterpreterMonad Env
+declGlobal (FnDef _ _ fnName args fnBody) env = do
+    let Env { varEnv = v, fnEnv = f } = env
+    let fnArgs = Prelude.map simplifyArg args
+    let fun = Func fnArgs fnBody
+    let newF = Map.insert fnName fun f
+    return Env { varEnv = v, fnEnv = newF }
+declGlobal (VarDef _ _ varName e) env = do
     newVarValue <- evalExp e
-    declareVariable varName newVarValue
-topDef (FnDef _ _ fnName args fnBody) = do
-    let args' = map simplifyArg args
-    declareFunction fnName (Func args' fnBody)
+    declareVariable varName newVarValue env
+
+declGlobals :: [TopDef] -> Env -> InterpreterMonad Env
+declGlobals (def:defs) env = declGlobal def env >>= declGlobals defs
+declGlobals [] env = return env
+
+-- topDef :: TopDef -> InterpreterMonad ()
+-- topDef (VarDef _ _ varName e) = do
+--     newVarValue <- evalExp e
+--     declareVariable varName newVarValue
+-- topDef (FnDef _ _ fnName args fnBody) = do
+--     let args' = map simplifyArg args
+--     declareFunction fnName (Func args' fnBody)
 
 runProgram :: Program -> InterpreterMonad ()
-runProgram (Program _ []) = do
-    Func _ block <- getFunction (Ident "main")
-    execBlock block
+runProgram (Program _ defs) = do
+    env <- declGlobals defs emptyEnv
+    maybeFun <- getFunction (Ident "main") env
+    let Just (Func _ block) = maybeFun
+    localEnv (const env) (execBlock block)
 
-runProgram (Program p (def: defs)) = do
-    topDef def
-    runProgram (Program p defs)
+-- runProgram (Program p (def: defs)) = do
+--     -- topDef def
+--     declGlobals
+--     runProgram (Program p defs)
 
 main = do
     args <- getArgs
@@ -302,13 +345,11 @@ main = do
                 Left err -> error err
                 Right program -> do
                     -- let errors = show $ runIdentity $ execState (TC.typeCheck program) $ Identity TC.CheckerState { TC.varState = Map.empty, TC.varEnv = Map.empty, TC.fnEnv = Map.empty, TC.errorState = "", TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition }
-                    let result = runCheckerMonad (TC.typeCheck program) TC.CheckerState { TC.varState = Map.empty, TC.errorState = "", TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition } TC.Env{ TC.fnEnv = Map.empty, TC.varEnv = Map.empty }
+                    let result = runCheckerMonad (TC.typeCheck program) TC.CheckerState { TC.varState = Map.empty, TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition } TC.emptyEnv
                     case result of {
                         Left err -> putStr err;
-                        Right _ -> print $ runIdentity $ execStateT (runProgram program) IntState { fnEnv = Map.empty, varState = Map.empty, varEnv = Map.empty, printState = "", returnState = Nothing }
+                        Right _ -> print $ runInterpreterMonad (runProgram program) IntState { varState = Map.empty, printState = "", returnState = Nothing, nextLoc = 0 } emptyEnv
                     }
         _ -> error "no file provided"
 
-        --POTENCJALNIE KWADRATOWE DODAWANIE NAPISÓW
         --BRAKUJE DZIELENIA PRZEZ ZERO
-        --SPRAWDZIĆ CZY MOŻNA ODWOŁYWAĆ SIĘ DO ZMIENNYCH W FUNKCJI
