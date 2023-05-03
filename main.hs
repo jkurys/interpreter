@@ -8,7 +8,7 @@ import qualified TypeChecker as TC
 import Data.Functor.Identity
 import Data.Maybe (isNothing)
 import Control.Monad.Trans.Except (runExceptT)
--- import TypeChecker (runCheckerMonad)
+import TypeChecker (runCheckerMonad)
 
 data FnArg = NoRef Ident | Ref Ident deriving Show
 
@@ -299,13 +299,14 @@ main = do
             file <- readFile path
             let lex = myLexer file
             case pProgram lex of
-                Left err -> error "Could not parse"
+                Left err -> error err
                 Right program -> do
-                    let errors = show $ runIdentity $ execState (TC.typeCheck program) $ Identity TC.CheckerState { TC.varState = Map.empty, TC.varEnv = Map.empty, TC.fnEnv = Map.empty, TC.errorState = "", TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition }
-                    -- let errors = show $ runCheckerMonad (TC.typeCheck program) TC.CheckerState { TC.varState = Map.empty, TC.varEnv = Map.empty, TC.fnEnv = Map.empty, TC.errorState = "", TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition }
-                    if errors /= ""
-                        then putStr errors
-                        else print $ runIdentity $ execStateT (runProgram program) IntState { fnEnv = Map.empty, varState = Map.empty, varEnv = Map.empty, printState = "", returnState = Nothing }
+                    -- let errors = show $ runIdentity $ execState (TC.typeCheck program) $ Identity TC.CheckerState { TC.varState = Map.empty, TC.varEnv = Map.empty, TC.fnEnv = Map.empty, TC.errorState = "", TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition }
+                    let result = runCheckerMonad (TC.typeCheck program) TC.CheckerState { TC.varState = Map.empty, TC.errorState = "", TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition } TC.Env{ TC.fnEnv = Map.empty, TC.varEnv = Map.empty }
+                    case result of {
+                        Left err -> putStr err;
+                        Right _ -> print $ runIdentity $ execStateT (runProgram program) IntState { fnEnv = Map.empty, varState = Map.empty, varEnv = Map.empty, printState = "", returnState = Nothing }
+                    }
         _ -> error "no file provided"
 
         --POTENCJALNIE KWADRATOWE DODAWANIE NAPISÓW
