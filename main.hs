@@ -40,16 +40,20 @@ data Env = Env {
     varEnv :: VarEnv
 }
 
+data LoopState = NormalLoop | BreakLoop | ContinueLoop
+
 emptyEnv :: Env
 emptyEnv = Env { varEnv = Map.empty, fnEnv = Map.empty }
 
 data IntState = IntState {
     varState :: VarState,
     returnState :: Maybe VarValue,
-    nextLoc :: Location
+    nextLoc :: Location,
+    loopState :: LoopState
 }
 
-type Error = String
+data Error = Err String | LoopBreak | LoopContinue
+-- type Error = String
 
 type InterpreterMonadT s e r m a = StateT s (ExceptT e (ReaderT r m)) a
 
@@ -61,8 +65,15 @@ type InterpreterMonad a = InterpreterMonadT IntState Error Env IO a
 runInterpreterMonad :: InterpreterMonad a -> IntState -> Env -> IO (Either Error a)
 runInterpreterMonad = runInterpreterMonadT
 
-throwRuntimeError :: Error -> InterpreterMonad ()
-throwRuntimeError err = lift $ throwE $ err ++ ".\n"
+throwRuntimeError :: String -> InterpreterMonad ()
+-- throwRuntimeError err = lift $ throwE $ err ++ ".\n"
+throwRuntimeError err = lift $ throwE $ Err $ err ++ ".\n"
+
+throwBreak :: InterpreterMonad ()
+throwBreak = lift $ throwE LoopBreak
+
+throwContinue :: InterpreterMonad ()
+throwContinue = lift $ throwE LoopContinue
 
 askInt :: InterpreterMonad Env
 askInt = lift $ lift ask
@@ -97,11 +108,11 @@ getFunction name env = do
 
 declareVariable :: Ident -> VarValue -> Env -> InterpreterMonad Env
 declareVariable name val Env { varEnv = v, fnEnv = f } = do
-    IntState { varState = s, returnState = r, nextLoc = n } <- get
+    IntState { varState = s, returnState = r, nextLoc = n, loopState = l } <- get
     let newV = Map.insert name n v
     let newS = Map.insert n val s
     let newEnv = Env { varEnv = newV, fnEnv = f }
-    put IntState { varState = newS, returnState = r, nextLoc = n + 1 }
+    put IntState { varState = newS, returnState = r, nextLoc = n + 1, loopState = l }
     return newEnv
 
 declareReference :: Ident -> Ident -> Env -> InterpreterMonad Env
@@ -111,14 +122,13 @@ declareReference oldName newName Env { varEnv = v, fnEnv = f } = do
     let newEnv = Env { varEnv = newV, fnEnv = f }
     return newEnv
 
-
 modifyVariable :: Ident -> VarValue -> InterpreterMonad ()
 modifyVariable name val = do
-    IntState { varState = s, returnState = r, nextLoc = n } <- get
+    IntState { varState = s, returnState = r, nextLoc = n, loopState = l } <- get
     Env { varEnv = v, fnEnv = f } <- askInt
     let Just loc = Map.lookup name v
     let newS = Map.insert loc val s
-    put IntState { varState = newS, returnState = r, nextLoc = n }
+    put IntState { varState = newS, returnState = r, nextLoc = n, loopState = l }
 
 getLValue :: Expr -> Ident
 getLValue (EVar _ s) = s
@@ -145,8 +155,18 @@ getReturnState = do
 
 putReturnState :: VarValue -> InterpreterMonad ()
 putReturnState newR = do
+    IntState { varState = v, returnState = r, nextLoc = n, loopState = l } <- get
+    put IntState { varState = v, returnState = Just newR, nextLoc = n, loopState = l }
+
+getLoopState :: InterpreterMonad LoopState
+getLoopState = do
+    IntState { loopState = l } <- get
+    return l
+
+putLoopState :: LoopState -> InterpreterMonad ()
+putLoopState newL = do
     IntState { varState = v, returnState = r, nextLoc = n } <- get
-    put IntState { varState = v, returnState = Just newR, nextLoc = n }
+    put IntState { varState = v, returnState = r, nextLoc = n, loopState = newL }
 
 evalExp :: Expr -> InterpreterMonad VarValue
 evalExp (EVar _ varName) = getVariable varName
@@ -238,7 +258,16 @@ execStmt (Decr _ varName) = do
     modifyVariable varName newVarVal
 execStmt (Cond _ e s) = evalExp e >>= (\(BoolVal b) -> CM.when b $ execStmt s)
 execStmt (CondElse _ e s1 s2) = evalExp e >>= (\(BoolVal b) -> if b then execStmt s1 else execStmt s2)
-execStmt (While p e s) = evalExp e >>= (\(BoolVal b) -> CM.when b $ execStmt s >> execStmt (While p e s))
+execStmt (While p e s) = do
+    res <- evalExp e
+    let BoolVal b = res
+    CM.when b $ do
+        execStmt s
+        l <- getLoopState
+        case l of {
+            BreakLoop -> putLoopState NormalLoop;
+            _ -> putLoopState NormalLoop >> execStmt (While p e s)
+        }
 execStmt (SExp _ e) = CM.void $ evalExp e
 execStmt (Print _ e) = do
     e' <- evalExp e
@@ -249,6 +278,10 @@ execStmt (Ret _ e) = do
     putReturnState e'
 execStmt (VRet _) = do
     putReturnState VoidVal
+execStmt (Break _) = do
+    putLoopState BreakLoop
+execStmt (Cont _) = do
+    putLoopState ContinueLoop
 
 execFn :: Block -> InterpreterMonad VarValue
 execFn (Block p stmts) = do
@@ -280,7 +313,13 @@ execBlock (Block p stmts) = do
         go (stmt:stmts) env = do
             case stmt of {
                 Decl _ _ items -> execDecl items env >>= (\env' -> localEnv (const env') (go stmts env'));
-                _ -> execStmt stmt >> go stmts env
+                _ -> do
+                    execStmt stmt
+                    loopState <- getLoopState
+                    case loopState of {
+                        NormalLoop -> go stmts env;
+                        _ -> return env
+                    }
             }
         go [] env = return env
 
@@ -315,13 +354,13 @@ main = do
             case pProgram lex of
                 Left err -> error err
                 Right program -> do
-                    let result = runCheckerMonad (TC.typeCheck program) TC.CheckerState { TC.varState = Map.empty, TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition } TC.emptyEnv
+                    let result = runCheckerMonad (TC.typeCheck program) TC.CheckerState { TC.varState = Map.empty, TC.nextLoc = 0, TC.returnType = Void BNFC'NoPosition, TC.loopState = TC.NotInLoop } TC.emptyEnv
                     case result of {
                         Left err -> hPutStr stderr err;
-                        Right _ -> do
-                            result <- runInterpreterMonad (runProgram program) IntState { varState = Map.empty, returnState = Nothing, nextLoc = 0 } emptyEnv
+                        _ -> do
+                            result <- runInterpreterMonad (runProgram program) IntState { varState = Map.empty, returnState = Nothing, nextLoc = 0, loopState = NormalLoop } emptyEnv
                             case result of {
-                                Left err -> hPutStr stderr err;
+                                Left (Err err) -> hPutStr stderr err;
                                 Right _ -> return ()
                             }
                     }

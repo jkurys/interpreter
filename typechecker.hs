@@ -29,10 +29,13 @@ data Env = Env {
     fnEnv :: FnEnv
 } deriving Show
 
+data Loop = InLoop | NotInLoop
+
 data CheckerState = CheckerState {
     varState :: VarState,
     nextLoc :: Int,
-    returnType :: Type
+    returnType :: Type,
+    loopState :: Loop
 }
 
 type CheckerMonadT s e r m a = StateT s (ExceptT e (ReaderT r m)) a
@@ -77,17 +80,27 @@ getReturnType = do
 
 putReturnType :: Type -> CheckerMonad ()
 putReturnType newRet = do
-    CheckerState { varState = s, nextLoc = n, returnType = r } <- get
-    put CheckerState { varState = s, nextLoc = n, returnType = newRet }
+    CheckerState { varState = s, nextLoc = n, returnType = r, loopState = l } <- get
+    put CheckerState { varState = s, nextLoc = n, returnType = newRet, loopState = l }
 
 declareVariable :: Ident -> Type -> Env -> CheckerMonad Env
 declareVariable name val env = do
-    CheckerState { varState = s, nextLoc = n, returnType = r } <- get
+    CheckerState { varState = s, nextLoc = n, returnType = r, loopState = l } <- get
     let Env { varEnv = v, fnEnv = f } = env
     let newV = Map.insert name n v
     let newS = Map.insert n val s
-    put CheckerState { varState = newS, nextLoc = n + 1, returnType = r }
+    put CheckerState { varState = newS, nextLoc = n + 1, returnType = r, loopState = l }
     return Env { varEnv = newV, fnEnv = f }
+
+getLoopState :: CheckerMonad Loop
+getLoopState = do
+    CheckerState { loopState = l } <- get
+    return l
+
+changeLoopState :: Loop -> CheckerMonad ()
+changeLoopState newL = do
+    CheckerState { varState = s, nextLoc = n, returnType = r } <- get
+    put CheckerState { varState = s, nextLoc = n, returnType = r, loopState = newL }
 
 getFunction :: Ident -> CheckerMonad (Maybe Function)
 getFunction name = do
@@ -274,11 +287,14 @@ checkStmt (CondElse p e s1 s2) = do
     checkStmt s2
 checkStmt (While p e s) = do
     e' <- evalExprType e
+    oldLoopState <- getLoopState
+    changeLoopState InLoop
     case e' of {
         Bool _ -> return ();
         _ -> addError p "Non-bool expression inside while condition"
     }
     checkStmt s
+    changeLoopState oldLoopState
 checkStmt (Ass p (LVar p2 name) e) = do
     var <- getVariable p2 name
     e' <- evalExprType e
@@ -294,8 +310,18 @@ checkStmt (Ass p (LArr p2 name e1) e2) = do
             _ -> addError p ("Tried to access non-array variable " ++ show arr ++ " as array. \n")
         }
 checkStmt (Print _ e) = CM.void $ evalExprType e
-checkStmt (Break _) = return ()
-checkStmt (Cont _) = return ()
+checkStmt (Break p) = do
+    loopState <- getLoopState
+    case loopState of {
+        InLoop -> return ();
+        NotInLoop -> addError p "Tried to use break outside of loop"
+    }
+checkStmt (Cont p) = do
+    loopState <- getLoopState
+    case loopState of {
+        InLoop -> return ();
+        NotInLoop -> addError p "Tried to use continue outside of loop"
+    }
 checkStmt (Decr p name) = do
     var <- getVariable p name
     case var of {
