@@ -1,0 +1,18 @@
+void increase_second(int[] &array) {
+    array[1] = array[1] + 1;
+}
+
+void increase_without_ref(int[] array) {    // this should do nothing
+    array[1] = array[1] + 1;
+}
+
+int main() {
+    int[] array = [1, 2, 3];
+    print(array);
+    print("\n");
+    increase_second(array);
+    print(array);
+    print("\n");
+    increase_without_ref(array);
+    print(array);
+}

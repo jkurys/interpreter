@@ -1,0 +1,11 @@
+int[] empty_if_odd(int n) {
+    if (n % 2 == 1) {
+        return [];
+    }
+    return [1];
+}
+
+int main() {
+    print(empty_if_odd(1));
+    print(empty_if_odd(2));
+}

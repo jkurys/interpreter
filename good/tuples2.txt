@@ -1,0 +1,15 @@
+|int, bool| global = |3, false|;
+
+|int, bool| number_as_abs_and_sign(int num) {
+    if num < 0 {
+        return |num * (-1), true|;
+    }
+    else {
+        return |num, false|;
+    }
+}
+
+int main() {
+    |int abs, bool sign| = number_as_abs_and_sign(-6);
+    print(abs * 2);
+}

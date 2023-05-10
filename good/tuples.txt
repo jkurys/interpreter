@@ -1,0 +1,17 @@
+|int, bool| divide_by_two_with_mod(int n) {
+    if (n % 2 == 0) {
+        return |n / 2, false|;
+    }
+    else {
+        return |n / 2, true|;
+    }
+}
+
+int main() {
+    print(divide_by_two_with_mod(4));
+    |int x, bool b| = divide_by_two_with_mod(7);
+    print("\n");
+    print(x);
+    print("\n");
+    print(b);
+}

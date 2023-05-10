@@ -120,25 +120,21 @@ declareArgs [] env = return env
 addError :: BNFC'Position -> ErrorState -> CheckerMonad ()
 addError p err = lift $ throwE $ showPosition p ++ " " ++ err ++ ".\n"
 
-isInt :: Type -> Bool
-isInt (Int _) = True
-isInt _ = False
-
-isBool :: Type -> Bool
-isBool (Bool _) = True
-isBool _ = False
-
 eqType :: Type -> Type -> Bool
 eqType (Int _) (Int _) = True
 eqType (Bool _) (Bool _) = True
 eqType (Str _) (Str _) = True
 eqType (Void _) (Void _) = True
-eqType (Arr _ t1) (Arr _ t2) = t1 `eqType` t2
+eqType (Arr _ t1) (Arr _ t2) = t1 `eqType` t2 || t1 `eqType` Void BNFC'NoPosition || t2 `eqType` Void BNFC'NoPosition
 eqType (Fun _ args1 return1) (Fun _ args2 return2) = go args1 args2 && return1 `eqType` return2 where
     go (arg1:args1) (arg2:args2) = arg1 `eqType` arg2 && go args1 args2
     go [] [] = True
-    go _ [] = False
-    go [] _ = False
+    go _ _ = False
+eqType (Tup _ els1) (Tup _ els2) = go els1 els2 where
+    go (el1:els1) (el2:els2) = el1 `eqType` el2 && go els1 els2
+    go [] [] = True
+    go _ _ = False
+
 eqType _ _ = False
 
 isLValue :: Expr -> Bool
@@ -168,7 +164,7 @@ showType (Int _) = "Int"
 showType (Str _) = "String"
 showType (Bool _) = "Bool"
 showType (Void _) = "Void"
-showType (Arr _ t) = show t ++ "[]"
+showType (Arr _ t) = showType t ++ "[]"
 showType (Tup _ ts) = "|" ++ go ts ++ "|" where
     go [t] = show t
     go (t:ts) = show t ++ ", " ++ show ts
@@ -180,6 +176,20 @@ showArgs :: [Type] -> String
 showArgs args = "(" ++ go args ++ ")" where
     go [arg] = showType arg
     go (arg:args) = showType arg ++ ", " ++ go args
+
+showTupleType :: [Type] -> String
+showTupleType tup = "|" ++ go tup ++ "|" where
+    go [Tup _ tup] = showTupleType tup
+    go [arg] = showType arg
+    go ((Tup _ tup):args) = showTupleType tup ++ ", " ++ go args
+    go (arg:args) = showType arg ++ ", " ++ go args
+
+showTuple :: [Tup] -> String
+showTuple tup = "|" ++ go tup ++ "|" where
+    go [ArgTup _ arg _] = showType arg
+    go [NewTup _ tup] = showTuple tup
+    go ((ArgTup _ arg _):args) = showType arg ++ ", " ++ go args
+    go ((NewTup _ tup):args) = showTuple tup ++ ", " ++ go args
 
 showFnArgs :: [FnArg] -> String
 showFnArgs args = "(" ++ go args ++ ")" where
@@ -224,37 +234,37 @@ evalExprType (EArr _ (e:es)) = do
 evalExprType (EAdd p e1 _ e2) = do
     e1' <- evalExprType e1
     e2' <- evalExprType e2
-    if not (isInt e1') || not (isInt e2')
-        then addError p "Non-integer expression inside add" >> return (Void BNFC'NoPosition)
+    if not (Int BNFC'NoPosition `eqType` e1') || not (Int BNFC'NoPosition `eqType` e2')
+        then addError p ("Non-integer expression inside add: " ++ showType e1' ++ " and " ++ showType e2') >> return (Void BNFC'NoPosition)
         else return $ Int p
 evalExprType (EMul p e1 _ e2) = do
     e1' <- evalExprType e1
     e2' <- evalExprType e2
-    if not (isInt e1') || not (isInt e2')
-        then addError p "Non-integer expression inside mul" >> return (Void BNFC'NoPosition)
+    if not (Int BNFC'NoPosition `eqType` e1') || not (Int BNFC'NoPosition `eqType` e2')
+        then addError p ("Non-integer expression inside mul" ++ showType e1' ++ " and " ++ showType e2') >> return (Void BNFC'NoPosition)
         else return $ Int p
 evalExprType (EAnd p e1 e2) = do
     e1' <- evalExprType e1
     e2' <- evalExprType e2
-    if not (isBool e1') || not (isBool e2')
-        then addError p "Non-boolean expression inside and" >> return (Void BNFC'NoPosition)
+    if not (Bool BNFC'NoPosition `eqType` e1') || not (Bool BNFC'NoPosition `eqType` e2')
+        then addError p ("Non-boolean expression inside and" ++ showType e1' ++ " and " ++ showType e2') >> return (Void BNFC'NoPosition)
         else return $ Bool p
 evalExprType (EOr p e1 e2) = do
     e1' <- evalExprType e1
     e2' <- evalExprType e2
-    if not (isBool e1') || not (isBool e2')
-        then addError p "Non-boolean expression inside or" >> return (Void BNFC'NoPosition)
+    if not (Bool BNFC'NoPosition `eqType` e1') || not (Bool BNFC'NoPosition `eqType` e2')
+        then addError p ("Non-boolean expression inside or" ++ showType e1' ++ " and " ++ showType e2') >> return (Void BNFC'NoPosition)
         else return $ Bool p
 evalExprType (EString p _) = return $ Str p
 evalExprType (Neg p e) = do
     e' <- evalExprType e
-    if not (isInt e')
-        then addError p "Negated non-integer expression" >> return (Void BNFC'NoPosition)
+    if not (Int BNFC'NoPosition `eqType` e')
+        then addError p ("Tried to negate non-integer expression of type: " ++ showType e') >> return (Void BNFC'NoPosition)
         else return $ Int p
 evalExprType (Not p e) = do
     e' <- evalExprType e
-    if not (isBool e')
-        then addError p "Logical NOT applied to a non-boolean expression" >> return (Void BNFC'NoPosition)
+    if not (Bool BNFC'NoPosition `eqType` e')
+        then addError p ("Tried to apply logical NOT to a non-boolean expression of type: " ++ showType e') >> return (Void BNFC'NoPosition)
         else return $ Bool p
 evalExprType (EApp p fnName fnArgs) = do
     var <- getFunction fnName
@@ -267,6 +277,23 @@ evalExprType (EApp p fnName fnArgs) = do
             if argTypesMatch
                 then return returnType
                 else addError p ("Function arguments do not match. Expected " ++ showFnArgs args ++ ", but got " ++ showArgs types) >> return (Void BNFC'NoPosition);
+evalExprType (EAcc p arrName e) = do
+    index <- evalExprType e
+    arr <- getVariable p arrName
+    case arr of {
+        Arr p' t -> if index `eqType` Int BNFC'NoPosition then return t else addError p ("Tried to access array with a non-integer type: " ++ showType index) >> return (Void BNFC'NoPosition);
+        t -> addError p ("Tried to access variable of type " ++ showType t ++ " like an array") >> return (Void BNFC'NoPosition)
+    }
+evalExprType (EEmptyArr p) = return $ Arr p (Void p)
+evalExprType (ETup p els) = do
+    res <- go els
+    return $ Tup p res where
+        go :: [Expr] -> CheckerMonad [Type]
+        go (el:els) = do
+            el' <- evalExprType el
+            els' <- go els
+            return (el':els')
+        go [] = return []
 
 checkStmt :: Stmt -> CheckerMonad ()
 checkStmt (Empty _) = return ()
@@ -274,14 +301,14 @@ checkStmt (Cond p e s) = do
     e' <- evalExprType e
     case e' of {
         Bool _ -> return ();
-        _ -> addError p "Non-bool expression inside if condition"
+        t -> addError p $ "Non-bool expression inside if condition: " ++ showType t
     }
     checkStmt s
 checkStmt (CondElse p e s1 s2) = do
     e' <- evalExprType e
     case e' of {
         Bool _ -> return ();
-        _ -> addError p "Non-bool expression inside if condition"
+        t -> addError p $ "Non-bool expression inside if condition: " ++ showType t
     }
     checkStmt s1
     checkStmt s2
@@ -291,7 +318,7 @@ checkStmt (While p e s) = do
     changeLoopState InLoop
     case e' of {
         Bool _ -> return ();
-        _ -> addError p "Non-bool expression inside while condition"
+        t -> addError p $ "Non-bool expression inside while condition: "  ++ showType t
     }
     checkStmt s
     changeLoopState oldLoopState
@@ -303,7 +330,7 @@ checkStmt (Ass p (LArr p2 name e1) e2) = do
     arr <- getVariable p2 name
     indexType <- evalExprType e1
     assignType <- evalExprType e2
-    if not (isInt indexType)
+    if not (Int BNFC'NoPosition `eqType` indexType)
         then addError p ("Tried to access array index with a non-Int type: " ++ showType indexType ++ ".\n")
         else case arr of {
             Arr _ arrType -> CM.unless (assignType `eqType` arrType) $ addError p ("Array type mismatch: assigning " ++ showType assignType ++ " to array of " ++ showType arrType ++ ".\n");
@@ -355,6 +382,40 @@ declareVariables p t ((Init _ name e):defs) env = do
     declareVariables p t defs nextEnv
 declareVariables _ _ [] env = return env
 
+declareFunction :: BNFC'Position -> Type -> Ident -> [Arg] -> Block -> Env -> CheckerMonad Env
+declareFunction p retType fnName args fnBody env@Env { fnEnv = f, varEnv = v } = do
+    let fnArgs = Prelude.map argToFnArg args
+    let fun = Func fnArgs retType
+    let newF = Map.insert fnName fun f
+    let envWithFunction = Env { fnEnv = newF, varEnv = v }
+    oldRet <- getReturnType
+    nextEnv <- declareArgs args envWithFunction
+    putReturnType retType
+    localEnv (const nextEnv) (checkBlock fnBody)
+    putReturnType oldRet
+    return nextEnv
+
+eqTupleType :: [Tup] -> [Type] -> Bool
+eqTupleType ((ArgTup _ t' _):tups) (t:ts) = t' `eqType` t && eqTupleType tups ts
+eqTupleType ((NewTup _ tup):tups) ((Tup _ tupTypes):ts) = eqTupleType tup tupTypes && eqTupleType tups ts
+eqTupleType [] [] = True
+eqTupleType _ _ = False
+
+declTuple :: BNFC'Position -> [Tup] -> [Type] -> Env -> CheckerMonad Env
+declTuple p ((ArgTup _ _ name):tups) (t:ts) env = declareVariable name t env >>= declTuple p tups ts
+declTuple p ((NewTup _ tup):tups) ((Tup _ tupTypes):ts) env = declTuple p tup tupTypes env >>= declTuple p tups ts
+declTuple _ _ _ env = return env
+
+declareTuple :: BNFC'Position -> [Tup] -> Expr -> Env -> CheckerMonad Env
+declareTuple p tup e env = do
+    result <- evalExprType e
+    case result of {
+        Tup _ resultTuple -> if eqTupleType tup resultTuple
+            then declTuple p tup resultTuple env
+            else addError p ("Expected tuple: " ++ showTuple tup ++ ", but got " ++ showTupleType resultTuple) >> return env;
+        result -> addError p ("Expected tuple: " ++ showTuple tup ++ ", but got " ++ showType result) >> return env
+    }
+
 checkBlock :: Block -> CheckerMonad ()
 checkBlock (Block p stmts) = do
     state <- get
@@ -365,6 +426,8 @@ checkBlock (Block p stmts) = do
             env <- askChecker
             case stmt of {
                 Decl p' t defs -> declareVariables p' t defs env >>= (\env' -> localEnv (const env') (go stmts));
+                DeclFn p' retType fnName args fnBody -> declareFunction p' retType fnName args fnBody env >>= (\env' -> localEnv (const env') (go stmts));
+                DeclTup p' tups e -> declareTuple p' tups e env >>= (\env' -> localEnv (const env') (go stmts));
                 _ -> checkStmt stmt >> go stmts
             }
         go [] = return ()

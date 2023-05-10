@@ -1,0 +1,13 @@
+int x = 1;
+
+void increase_x() {
+    x++;
+}
+
+int main() {
+    print(x);
+    print("\n");
+    x = 3;
+    increase_x();
+    print(x);
+}
